@@ -1,0 +1,172 @@
+---
+title: "Predict Weight Lifting Exercises Preformance by Radom Forest"
+author: "Yifan Shen"
+date: "`r date()`"
+output: html_document
+---
+
+```{r options, echo=FALSE, results='hide', message=FALSE, warning = FALSE}
+library(knitr)
+library(randomForest)
+Sys.setlocale(category = "LC_ALL", locale = "C")
+opts_chunk$set(message=FALSE, warning = FALSE)
+```
+
+## Overview
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways.
+
+## Data PreProcessing
+
+The data for this project come from this source: [http://groupware.les.inf.puc-rio.br/har](http://groupware.les.inf.puc-rio.br/har) (see the section on the Weight Lifting Exercise Dataset). 
+The train set can be download [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv)
+The test set(not the real test set but the one for submission of this project) can be download [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv)
+
+Take a quick look at the data, it contains 160 features and 19622 observations, but most near 1/3 observations have a high rate of missing value.So fisrt we need to exclude those features which NA rate is greater than 0.5.
+
+
+```{r cache=TRUE}
+training <- read.csv("pml-training.csv", stringsAsFactors = FALSE)
+dim(training)
+na.rate <- sapply(training, function(x){sum(is.na(x))/length(x)})
+names(na.rate)[na.rate > 0.5]
+```
+
+As we can see from above, 67 features have a high missing rate, we need to exclude them first. The rest features still contains some NAs, so we used median of each feature to impute those NAs. In order to clear data in an easily way we create a function as below to implements the data-cleaning method we talked above.
+
+```{r}
+library(dplyr)
+library(caret)
+clear.data <- function (data.sub) {
+        t <- lapply(data.sub, as.numeric)
+        data.sub <- as.data.frame(do.call(cbind, t))        
+        data.sub <- select(data.sub, - which(sapply(data.sub, function(x){sum(is.na(x))/length(x)}) > 0.5))    
+        ## filling NAs by median
+        preObj <- preProcess(data.sub, method = c("medianImpute"))
+        data.sub <- data.frame(predict(preObj, data.sub))
+        data.sub
+}
+train.sub <- select(training, c(8:160))
+classe <- as.factor(train.sub$classe)
+train.sub <- clear.data(train.sub[, - length(train.sub)])
+train.sub <- data.frame(train.sub, classe)
+```
+
+After data cleaned, the number of features have been reduced to 53.
+
+```{r}
+dim(train.sub)
+```
+
+To train and verified the predition model, we divided the data into 2 parts, 70% for training and the rest 30% for testing.
+
+```{r}
+set.seed(1)
+inTrain <- createDataPartition(training$classe, p = 0.7, list = FALSE)
+train.set <- train.sub[inTrain,]
+test.set<- train.sub[-inTrain,]
+```
+
+## Model Training and Tuning
+
+We decide to train the data by Random Forest which is characterized by a subset of features, selected in a random
+and independent manner with the same distribution for each of the trees in the forest.
+
+In the random forest algorithm, there is only two parameters need to tune which are **ntree** and  **mtry**. ntree indicates the number of trees to grow. This should not be set to too small a number, to ensure that every input row gets predicted at least a few times. mtry indicates the number of variables randomly sampled as candidates at each split.
+
+Cause the ntree should not be small, so we set ntree = 500. we use cross validation talked in the later to decide the mtry.
+
+### Cross Validation
+
+A repeated K-fold cross-validation is applied  on the training set to tuning the mtry parameter as well as reduce the generalized error. beside, the random forest itself estimated the test error internally during the run.
+
+Each tree is constructed using a different bootstrap sample from the original data. About one-third of the cases are left out of the bootstrap sample and not used in the construction of the kth tree.
+
+Put each case left out in the construction of the kth tree down the kth tree to get a classification. In this way, a test set classification is obtained for each case in about one-third of the trees. At the end of the run, take j to be the class that got most of the votes every time case n was oob. The proportion of times that j is not equal to the true class of n averaged over all cases is the **oob error** estimate.
+
+
+
+## Recognition Performance
+Using random forest to with 5 repeated 10-fold corss validation to train the model.
+```{r cache=TRUE}
+fitControl <- trainControl(
+        method = "repeatedcv",
+        number = 10,
+        repeats=5,
+        classProbs = TRUE)
+rfModel <- train(classe~., data=train.set, method = "rf" ,trControl = fitControl)
+```
+
+We use 500 trees implementing the random forest. The classifier was tested with 10-fold cross-validation repeated 5 times.The tuning result shows as follow:
+
+```{r echo=FALSE}
+kable(rfModel$results, "html")
+```
+
+We can find that the highest accuracy is got when the mtry = 27, so we choose mtry = 27 to build the finalModel. The performance of the final model shown below.
+
+```{r echo=FALSE}
+rfModel$finalModel
+```
+
+According to this model the out of bag estimate of error rate is 0.7%. We apply the model on the test set for classification, the related statistics and confusion matrix shown as follow.
+
+```{r}
+cm <- confusionMatrix(data = predict(rfModel$finalModel, test.set), reference = test.set$classe)
+kable(cm$byClass, "html")
+```
+
+```{r echo=FALSE}
+library(reshape2)
+library(ggplot2)
+m <- cm$table
+m <- apply(m,MARGIN = 1,FUN = function(x){x/sum(x)})
+m <- melt(m)
+g <- ggplot(m,aes(x=Var1, y=Prediction, fill=value))
+g + geom_tile(color="white", size=1) + scale_fill_gradient(low='yellow', high='red')+geom_text(aes(label=round(value,4)), angle=45) + labs(title = "Confusion Matrix", x="Reality")
+```
+
+The detailed accuracy by class was of: (A) 99.64%, (B) 99.56%, (C) 98.93%, (D) 99.38%, (E) 99.72%. The accuracy seems quite nice by it takes a huge amount of time to train the model, so we decide to compress the number of features in the next section.
+
+## Feature Compression by Variable Importance
+
+Although the performance seems quite well, training and tuning of this model takes a lot of time.So we are trying to compress features by measuring the variable importance.We select the Top 10 important features as classifiers and use the same method to training and tuning the model again.The Top 10 important features show as follows.
+
+```{r}
+imp <- varImp(rfModel)
+train.set2 <- train.set[order(imp$importance, decreasing = T)][1 : 10]
+names(train.set2)
+```
+
+
+```{r cache=TRUE}
+train.set2 <- data.frame(train.set2, classe = train.set$classe)
+rfModel10 <- train(classe~., data=train.set2, method = "rf" ,trControl = fitControl)
+rfModel10$times
+```
+
+In this time, it only takes around 20 min to train the model, We use this model to classify the test set and take a look at the related statistics and confusion matrix.
+
+```{r}
+cm <- confusionMatrix(data = predict(rfModel10$finalModel, test.set), reference = test.set$classe)
+kable(cm$byClass, "html")
+```
+
+
+```{r echo=FALSE}
+library(reshape2)
+library(ggplot2)
+m <- cm$table
+m <- apply(m,MARGIN = 1,FUN = function(x){x/sum(x)})
+m <- melt(m)
+g <- ggplot(m,aes(x=Var1, y=Prediction, fill=value))
+g + geom_tile(color="white", size=1) + scale_fill_gradient(low='yellow', high='red') + geom_text(aes(label=round(value,4)), angle=45) + labs(title = "Confusion Matrix", x="Reality")
+```
+
+The preformance is still quite well. The detailed accuracy by class was of: (A) 99.52%, (B) 97.57%, (C) 98.25%, (D) 99.27%, (E) 99.44%.
+
+## Conclusion
+
+In this project, we aimming to classify the quality of barbell lifts. The data is clear by excluding large missing rate features and impute the rest NAs with median. The basic classification model is train by random forest, get a quite well out of sample error rate but the training consumes a large amount of time. The variable importance is calculated for compressing number of features.The second model still have a low out of sample error rate and take less time for training.
+
+
